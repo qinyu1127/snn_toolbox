@@ -113,14 +113,7 @@ class ModelParser(AbstractModelParser):
 
     @property
     def input_layer_name(self):
-        # Check if model has a dedicated input layer. If so, return its name.
-        # Otherwise, the first layer might be a conv layer, so we return
-        # 'input'.
-        first_layer = self.input_model.layers[0]
-        if 'Input' in self.get_type(first_layer):
-            return first_layer.name
-        else:
-            return 'input'
+        return self.input_model.layers[0].name
 
 
 def load(path, filename, **kwargs):
@@ -177,8 +170,8 @@ def load(path, filename, **kwargs):
             print(e)
             print("Trying to load without '.h5' extension.")
             model = models.load_model(filepath, custom_dicts)
-        model.compile(model.optimizer, model.loss,
-                      ['accuracy', metrics.top_k_categorical_accuracy])
+            model.compile(model.optimizer, model.loss,
+                          ['accuracy', metrics.top_k_categorical_accuracy])
 
     model.summary()
     return {'model': model, 'val_fn': model.evaluate}

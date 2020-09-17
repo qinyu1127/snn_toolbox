@@ -104,8 +104,9 @@ def normalize_parameters(model, config, **kwargs):
             sparsity.append(1 - nonzero_activations.size / activations.size)
             del activations
             perc = get_percentile(config, i)
-            scale_facs[layer.name] = get_scale_fac(nonzero_activations, perc)
-            print("Scale factor: {:.2f}.".format(scale_facs[layer.name]))
+            for i in perc:
+                scale_facs[layer.name] = get_scale_fac(nonzero_activations, i)
+                print("Scale factor: {:.2f}.".format(scale_facs[layer.name]))
             # Since we have calculated output activations here, check at this
             # point if the output is mostly negative, in which case we should
             # stick to softmax. Otherwise ReLU is preferred.
@@ -285,7 +286,8 @@ def get_percentile(config, layer_idx=None):
 
     """
 
-    perc = config.getfloat('normalization', 'percentile')
+    perc = eval(config.get('normalization', 'percentile'))
+    perc = perc['percentile']
 
     if config.getboolean('normalization', 'normalization_schedule'):
         assert layer_idx >= 0, "Layer index needed for normalization schedule."

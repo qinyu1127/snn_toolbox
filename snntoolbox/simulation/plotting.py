@@ -409,8 +409,8 @@ def plot_layer_correlation(rates, activations, title, config, path=None,
     plt.title(title, fontsize=20)
     plt.locator_params(nbins=4)
     lim = max([1.1, max(activations), max(rates)]) if same_xylim else None
-    plt.xlim([0, lim])
-    plt.ylim([0, lim])
+    plt.xlim([-1, lim])
+    plt.ylim([-1, lim])
     plt.xlabel('ANN activations', fontsize=16)
     plt.ylabel('SNN spikerates [Hz]', fontsize=16)
     if path is not None:

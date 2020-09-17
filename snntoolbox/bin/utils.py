@@ -74,12 +74,15 @@ def run_pipeline(config, queue=None):
 
         # Evaluate input model.
         if config.getboolean('tools', 'evaluate_ann') and not is_stop(queue):
-            print("Evaluating input model on {} samples...".format(
-                num_to_test))
-            acc = model_lib.evaluate(input_model['val_fn'],
-                                     config.getint('simulation', 'batch_size'),
-                                     num_to_test, **testset)
-            results = [acc]
+            if config.get('input','dataset_format') == 'seg':
+                results = input_model['model'].evaluate(testset['x_test'], testset['y_test'], verbose=1)
+            else:
+                print("Evaluating input model on {} samples...".format(
+                    num_to_test))
+                acc = model_lib.evaluate(input_model['val_fn'],
+                                         config.getint('simulation', 'batch_size'),
+                                         num_to_test, **testset)
+                results = [acc]
 
         # ____________________________ PARSE ________________________________ #
 
@@ -95,12 +98,15 @@ def run_pipeline(config, queue=None):
 
         # Evaluate parsed model.
         if config.getboolean('tools', 'evaluate_ann') and not is_stop(queue):
-            print("Evaluating parsed model on {} samples...".format(
-                num_to_test))
-            score = model_parser.evaluate(
-                config.getint('simulation', 'batch_size'),
-                num_to_test, **testset)
-            results = [score[1]]
+            if config.get('input','dataset_format') == 'seg':
+                results = parsed_model.evaluate(testset['x_test'], testset['y_test'], verbose=1)
+            else:
+                print("Evaluating parsed model on {} samples...".format(
+                    num_to_test))
+                score = model_parser.evaluate(
+                    config.getint('simulation', 'batch_size'),
+                    num_to_test, **testset)
+                results = [score[1]]
 
         # Write parsed model to disk
         parsed_model.save(str(

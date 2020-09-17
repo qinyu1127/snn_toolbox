@@ -171,6 +171,7 @@ class AbstractSNN:
                                                          'early_stopping')
         self._is_aedat_input = \
             self.config.get('input', 'dataset_format') == 'aedat'
+        self._image_size = self.config.getint('input', 'image_size')
         self._poisson_input = self.config.getboolean('input', 'poisson_input')
         self._num_poisson_events_per_sample = \
             self.config.getint('input', 'num_poisson_events_per_sample')
@@ -566,97 +567,111 @@ class AbstractSNN:
                 eval(self.config.get('input', 'chip_size')), image_shape,
                 eval(self.config.get('input', 'label_dict')))
             data_batch_kwargs['dvs_gen'] = dvs_gen
-
+        current_acc_sum = 0
         # Simulate the SNN on a batch of samples in parallel.
         for batch_idx in range(num_batches):
-
-            # Get a batch of samples
-            x_b_l = None
-            y_b_l = None
-            if x_test is not None:
+            if self.config.get('input','dataset_format') == 'seg':
+                print("current batch {}".format(batch_idx))
+                # print("\nStarting new simulation...\n")
                 batch_idxs = range(self.batch_size * batch_idx,
                                    self.batch_size * (batch_idx + 1))
                 x_b_l = x_test[batch_idxs, :]
-                if y_test is not None:
-                    y_b_l = y_test[batch_idxs, :]
-            elif dataflow is not None:
-                x_b_l, y_b_l = dataflow.next()
-            elif self._is_aedat_input:
-                try:
-                    data_batch_kwargs['dvs_gen'].next_sequence_batch()
-                    y_b_l = data_batch_kwargs['dvs_gen'].y_b
-                except StopIteration:
-                    break
+                y_b_l = y_test[batch_idxs, :]
+                data_batch_kwargs['x_b_l'] = x_b_l
+                data_batch_kwargs['y_b_l'] = y_b_l
+                # x_b_l = x_test
+                current_acc = self.simulate_seg(**data_batch_kwargs)
+                current_acc_sum = current_acc_sum + current_acc
+                current_acc_mean = current_acc_sum/ (batch_idx+1)
+                print("Moving accuracy of SNN {:.2%}.".format(current_acc_mean))
+            # Get a batch of samples
+            else:
+                x_b_l = None
+                y_b_l = None
+                if x_test is not None:
+                    batch_idxs = range(self.batch_size * batch_idx,
+                                       self.batch_size * (batch_idx + 1))
+                    x_b_l = x_test[batch_idxs, :]
+                    if y_test is not None:
+                        y_b_l = y_test[batch_idxs, :]
+                elif dataflow is not None:
+                    x_b_l, y_b_l = dataflow.next()
+                elif self._is_aedat_input:
+                    try:
+                        data_batch_kwargs['dvs_gen'].next_sequence_batch()
+                        y_b_l = data_batch_kwargs['dvs_gen'].y_b
+                    except StopIteration:
+                        break
 
-                # Generate frames so we can compare with ANN.
-                x_b_l = data_batch_kwargs['dvs_gen'].get_frame_batch()
+                    # Generate frames so we can compare with ANN.
+                    x_b_l = data_batch_kwargs['dvs_gen'].get_frame_batch()
 
-            # Effective batch size could be smaller than user-specified
-            # self.batch_size if dataset size not an integer multiple.
-            if len(x_b_l) < self.batch_size:
-                continue
+                # Effective batch size could be smaller than user-specified
+                # self.batch_size if dataset size not an integer multiple.
+                if len(x_b_l) < self.batch_size:
+                    continue
 
-            truth_b = np.argmax(y_b_l, axis=1)
+                truth_b = np.argmax(y_b_l, axis=1)
 
-            data_batch_kwargs['truth_b'] = truth_b
-            data_batch_kwargs['x_b_l'] = x_b_l
+                data_batch_kwargs['truth_b'] = truth_b
+                data_batch_kwargs['x_b_l'] = x_b_l
 
-            # Main step: Run the network on a batch of samples for the duration
-            # of the simulation.
-            print("\nStarting new simulation...\n")
-            output_b_l_t = self.simulate(**data_batch_kwargs)
+                # Main step: Run the network on a batch of samples for the duration
+                # of the simulation.
+                print("\nStarting new simulation...\n")
+                output_b_l_t = self.simulate(**data_batch_kwargs)
 
-            # Halt if model is to be serialised only.
-            if self.config.getboolean('tools', 'serialise_only'):
-                sys.exit()
+                # Halt if model is to be serialised only.
+                if self.config.getboolean('tools', 'serialise_only'):
+                    sys.exit()
 
-            # Get classification result by comparing the guessed class (i.e.
-            # the index of the neuron in the last layer which spiked most) to
-            # the ground truth.
-            guesses_b_t = np.argmax(output_b_l_t, 1)
-            # Find sample indices for which there was no output spike yet.
-            undecided_b_t = np.nonzero(np.sum(output_b_l_t, 1) == 0)
-            # Assign negative value such that undecided samples count as
-            # wrongly classified.
-            guesses_b_t[undecided_b_t] = -1
+                # Get classification result by comparing the guessed class (i.e.
+                # the index of the neuron in the last layer which spiked most) to
+                # the ground truth.
+                guesses_b_t = np.argmax(output_b_l_t, 1)
+                # Find sample indices for which there was no output spike yet.
+                undecided_b_t = np.nonzero(np.sum(output_b_l_t, 1) == 0)
+                # Assign negative value such that undecided samples count as
+                # wrongly classified.
+                guesses_b_t[undecided_b_t] = -1
 
-            # Get classification error of current batch, for each time step.
-            self.top1err_b_t = guesses_b_t != np.broadcast_to(
-                np.expand_dims(truth_b, -1), guesses_b_t.shape)
-            for t in range(self._num_timesteps):
-                self.top5err_b_t[:, t] = np.logical_not(
-                    in_top_k(output_b_l_t[:, :, t], truth_b, self.top_k))
+                # Get classification error of current batch, for each time step.
+                self.top1err_b_t = guesses_b_t != np.broadcast_to(
+                    np.expand_dims(truth_b, -1), guesses_b_t.shape)
+                for t in range(self._num_timesteps):
+                    self.top5err_b_t[:, t] = np.logical_not(
+                        in_top_k(output_b_l_t[:, :, t], truth_b, self.top_k))
 
-            # Add results of current batch to previous results.
-            truth_d += list(truth_b)
-            guesses_d += list(guesses_b_t[:, -1])
+                # Add results of current batch to previous results.
+                truth_d += list(truth_b)
+                guesses_d += list(guesses_b_t[:, -1])
 
-            # Print current accuracy.
-            num_samples_seen = (batch_idx + 1) * self.batch_size
-            top1acc_moving = np.mean(np.array(truth_d) == np.array(guesses_d))
-            top5score_moving += sum(in_top_k(output_b_l_t[:, :, -1], truth_b,
-                                             self.top_k))
-            top5acc_moving = top5score_moving / num_samples_seen
-            print("\nBatch {} of {} completed ({:.1%})".format(
-                batch_idx + 1, num_batches, (batch_idx + 1) / num_batches))
-            print("Moving accuracy of SNN (top-1, top-{}): {:.2%}, {:.2%}."
-                  "".format(self.top_k, top1acc_moving, top5acc_moving))
+                # Print current accuracy.
+                num_samples_seen = (batch_idx + 1) * self.batch_size
+                top1acc_moving = np.mean(np.array(truth_d) == np.array(guesses_d))
+                top5score_moving += sum(in_top_k(output_b_l_t[:, :, -1], truth_b,
+                                                 self.top_k))
+                top5acc_moving = top5score_moving / num_samples_seen
+                print("\nBatch {} of {} completed ({:.1%})".format(
+                    batch_idx + 1, num_batches, (batch_idx + 1) / num_batches))
+                print("Moving accuracy of SNN (top-1, top-{}): {:.2%}, {:.2%}."
+                      "".format(self.top_k, top1acc_moving, top5acc_moving))
 
-            # Evaluate ANN on the same batch as SNN for a direct comparison.
-            score = self.parsed_model.evaluate(
-                x_b_l, y_b_l, self.parsed_model.input_shape[0], verbose=0)
-            score1_ann += score[1] * self.batch_size
-            score5_ann += score[2] * self.batch_size
-            self.top1err_ann = 1 - score1_ann / num_samples_seen
-            self.top5err_ann = 1 - score5_ann / num_samples_seen
-            print("Moving accuracy of ANN (top-1, top-{}): {:.2%}, {:.2%}."
-                  "\n".format(self.top_k, 1 - self.top1err_ann,
-                              1 - self.top5err_ann))
+                # Evaluate ANN on the same batch as SNN for a direct comparison.
+                score = self.parsed_model.evaluate(
+                    x_b_l, y_b_l, self.parsed_model.input_shape[0], verbose=0)
+                score1_ann += score[1] * self.batch_size
+                score5_ann += score[2] * self.batch_size
+                self.top1err_ann = 1 - score1_ann / num_samples_seen
+                self.top5err_ann = 1 - score5_ann / num_samples_seen
+                print("Moving accuracy of ANN (top-1, top-{}): {:.2%}, {:.2%}."
+                      "\n".format(self.top_k, 1 - self.top1err_ann,
+                                  1 - self.top5err_ann))
 
-            with open(path_acc, str('a')) as f_acc:
-                f_acc.write(str("{} {:.2%} {:.2%} {:.2%} {:.2%}\n".format(
-                    num_samples_seen, top1acc_moving, top5acc_moving,
-                    1 - self.top1err_ann, 1 - self.top5err_ann)))
+                with open(path_acc, str('a')) as f_acc:
+                    f_acc.write(str("{} {:.2%} {:.2%} {:.2%} {:.2%}\n".format(
+                        num_samples_seen, top1acc_moving, top5acc_moving,
+                        1 - self.top1err_ann, 1 - self.top5err_ann)))
 
             # Plot input image.
             if 'input_image' in self._plot_keys:
@@ -712,7 +727,7 @@ class AbstractSNN:
             log_vars['top5err_ann'] = self.top5err_ann
             log_vars['operations_ann'] = self.operations_ann / 1e6
             log_vars['input_image_b_l'] = x_b_l
-            log_vars['true_classes_b'] = truth_b
+            # log_vars['true_classes_b'] = truth_b
             if self.spiketrains_n_b_l_t is not None:
                 log_vars['avg_rate'] = self.get_avg_rate_from_trains()
                 print("Average spike rate: {} spikes per simulation time step."

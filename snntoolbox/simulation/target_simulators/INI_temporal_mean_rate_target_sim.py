@@ -12,6 +12,9 @@ import numpy as np
 
 from snntoolbox.parsing.utils import get_inbound_layers_with_params
 from snntoolbox.simulation.utils import AbstractSNN, remove_name_counter
+import skimage.io as io
+import skimage.transform as trans
+import numpy as np
 
 remove_classifier = False
 
@@ -42,6 +45,7 @@ class SNN(AbstractSNN):
         self._spiking_layers = {}
         self._input_images = None
         self._binary_activation = None
+        self._prev_mem = None
 
     @property
     def is_parallelizable(self):
@@ -52,6 +56,41 @@ class SNN(AbstractSNN):
         self._spiking_layers[self.parsed_model.layers[0].name] = \
             self._input_images
 
+    # def add_layer(self, layer):
+    #     from snntoolbox.parsing.utils import get_type
+    #     spike_layer_name = getattr(self.sim, 'Spike' + get_type(layer))
+    #     # noinspection PyProtectedMember
+    #     inbound = layer._inbound_nodes[0].inbound_layers
+    #     if not isinstance(inbound, (list, tuple)):
+    #         inbound = [inbound]
+    #     inbound = [self._spiking_layers[inb.name] for inb in inbound]
+    #     if len(inbound) == 1:
+    #         inbound = inbound[0]
+    #     layer_kwargs = layer.get_config()
+    #     layer_kwargs['config'] = self.config
+    #
+    #     # Check if layer uses binary activations. In that case, we will want to
+    #     # tell the following to MaxPool layer because then we can use a
+    #     # cheaper operation.
+    #     if 'Conv' in layer.name and 'binary' in layer.activation.__name__:
+    #         self._binary_activation = layer.activation.__name__
+    #
+    #     if 'MaxPool' in layer.name and self._binary_activation is not None:
+    #         layer_kwargs['activation'] = self._binary_activation
+    #         self._binary_activation = None
+    #
+    #     # Replace activation from kwargs by 'linear' before initializing
+    #     # superclass, because the relu activation is applied by the spike-
+    #     # generation mechanism automatically. In some cases (quantized
+    #     # activation), we need to apply the activation manually. This
+    #     # information is taken from the 'activation' key during conversion.
+    #     activation_str = str(layer_kwargs.pop(str('activation'), None))
+    #
+    #     spike_layer = spike_layer_name(**layer_kwargs)
+    #     spike_layer.activation_str = activation_str
+    #     spike_layer.is_first_spiking = \
+    #         len(get_inbound_layers_with_params(layer)) == 0
+    #     self._spiking_layers[layer.name] = spike_layer(inbound)
     def add_layer(self, layer):
         from snntoolbox.parsing.utils import get_type
         spike_layer_name = getattr(self.sim, 'Spike' + get_type(layer))
@@ -86,7 +125,10 @@ class SNN(AbstractSNN):
         spike_layer.activation_str = activation_str
         spike_layer.is_first_spiking = \
             len(get_inbound_layers_with_params(layer)) == 0
-        self._spiking_layers[layer.name] = spike_layer(inbound)
+        self._spiking_layers[layer.name] = spike_layer(inbound, self._prev_mem)
+        if 'Conv' in layer.name and 'Conv2D_256x256x1' not in layer.name:
+            if 'MaxPool'in layer.outbound_nodes[0].layer.name:
+                self._prev_mem = spike_layer.mem_acc
 
     def build_dense(self, layer):
         pass
@@ -130,6 +172,110 @@ class SNN(AbstractSNN):
                     keras.backend.set_value(
                         layer.b0, keras.backend.get_value(layer.bias))
 
+    def simulate_seg(self, **kwargs):
+
+        from snntoolbox.utils.utils import echo
+        from snntoolbox.simulation.utils import get_layer_synaptic_operations
+
+        input_b_l = kwargs[str('x_b_l')] * self._dt
+        truth_b = kwargs[str('y_b_l')]
+
+        # Optionally stop simulation of current batch when number of input
+        # spikes exceeds a given limit.
+        # num_timesteps = self._get_timestep_at_spikecount(input_b_l)
+
+        output_b_l_t = np.zeros((1, self._image_size, self._image_size, 1,
+                                 self._num_timesteps))
+
+
+
+        # Loop through simulation time.
+        self._input_spikecount = 0
+        for sim_step_int in range(self._num_timesteps):
+            sim_step = (sim_step_int + 1) * self._dt
+            self.set_time(sim_step)
+            #
+
+            # Main step: Propagate input through network and record output
+            # spikes.
+            out_spikes = self.snn.predict_on_batch(input_b_l)
+            # out_spikes = self.snn.predict(input_b_l, steps=30, verbose=0)
+
+            # Add current spikes to previous spikes.
+            if remove_classifier:  # Need to flatten output.
+                output_b_l_t[:, :, sim_step_int] = np.argmax(np.reshape(
+                    out_spikes > 0, (out_spikes.shape[0], -1)), 1)
+            else:
+                output_b_l_t[:, :, :, :, sim_step_int] = out_spikes
+
+            # Record neuron variables.
+            i = j = 0
+            for layer in self.snn.layers:
+                # Excludes Input, Flatten, Concatenate, etc:
+                if hasattr(layer, 'spiketrain') \
+                        and layer.spiketrain is not None:
+                    spiketrains_b_l = keras.backend.get_value(layer.spiketrain)
+                    if self.spiketrains_n_b_l_t is not None:
+                        self.spiketrains_n_b_l_t[i][0][
+                            Ellipsis, sim_step_int] = spiketrains_b_l
+                    if self.synaptic_operations_b_t is not None:
+                        self.synaptic_operations_b_t[:, sim_step_int] += \
+                            get_layer_synaptic_operations(spiketrains_b_l,
+                                                          self.fanout[i + 1])
+                    if self.neuron_operations_b_t is not None:
+                        self.neuron_operations_b_t[:, sim_step_int] += \
+                            self.num_neurons_with_bias[i + 1]
+                    i += 1
+                # if hasattr(layer, 'mem') and self.mem_n_b_l_t is not None:
+                #     self.mem_n_b_l_t[j][0][Ellipsis, sim_step_int] = \
+                #         keras.backend.get_value(layer.mem)
+                #     j += 1
+
+            # if 'input_b_l_t' in self._log_keys:
+            #     self.input_b_l_t[Ellipsis, sim_step_int] = input_b_l
+            # if self._poisson_input or self._is_aedat_input:
+            #     if self.synaptic_operations_b_t is not None:
+            #         self.synaptic_operations_b_t[:, sim_step_int] += \
+            #             get_layer_synaptic_operations(input_b_l,
+            #                                           self.fanout[0])
+            # else:
+            #     if self.neuron_operations_b_t is not None:
+            #         if sim_step_int == 0:
+            #             self.neuron_operations_b_t[:, 0] += self.fanin[1] * \
+            #                                                 self.num_neurons[1] * np.ones(self.batch_size) * 2
+
+            spike_sums_b_l = np.sum(output_b_l_t, 4)/sim_step
+            if  sim_step % 100 == 0:
+                saveResult("/home/qinche/snn_toolbox_seg/snn_toolbox/temp_seg/predictions", spike_sums_b_l)
+            spike_sums_b_l[spike_sums_b_l > 0.5] = 1
+            spike_sums_b_l[spike_sums_b_l <= 0.5] = 0
+            #
+            # # mask = tf.math.logi
+            mask = np.logical_xor(spike_sums_b_l, truth_b)
+            current_acc = 1 - np.mean(mask)
+            # # current_acc = np.mean(kwargs[str('truth_b')] == clean_guesses_b)
+            if self.config.getint('output', 'verbose') > 0 \
+                    and sim_step % 1 == 0:
+                echo('{:.2%}_'.format(current_acc))
+            else:
+                sys.stdout.write('\r{:>7.2%}'.format(current_acc))
+                sys.stdout.flush()
+
+        # if self._is_aedat_input:
+        #     remaining_events = \
+        #         kwargs[str('dvs_gen')].remaining_events_of_current_batch()
+        # elif self._poisson_input and self._num_poisson_events_per_sample > 0:
+        #     remaining_events = self._num_poisson_events_per_sample - \
+        #                        self._input_spikecount
+        # else:
+        #     remaining_events = 0
+        # if remaining_events > 0:
+        #     print("\nSNN Toolbox WARNING: Simulation of current batch "
+        #           "finished, but {} input events were not processed. Consider "
+        #           "increasing the simulation time.".format(remaining_events))
+
+        return current_acc
+
     def simulate(self, **kwargs):
 
         from snntoolbox.utils.utils import echo
@@ -144,7 +290,7 @@ class SNN(AbstractSNN):
         output_b_l_t = np.zeros((self.batch_size, self.num_classes,
                                  self._num_timesteps))
 
-        print("Current accuracy of batch:")
+        # print("Current accuracy of batch:")
 
         # Loop through simulation time.
         self._input_spikecount = 0
@@ -374,3 +520,31 @@ class SNN(AbstractSNN):
                 print(t)
                 return min(t, self._num_timesteps)
             t += 1
+
+
+Sky = [128,128,128]
+Building = [128,0,0]
+Pole = [192,192,128]
+Road = [128,64,128]
+Pavement = [60,40,222]
+Tree = [128,128,0]
+SignSymbol = [192,128,128]
+Fence = [64,64,128]
+Car = [64,0,128]
+Pedestrian = [64,64,0]
+Bicyclist = [0,128,192]
+Unlabelled = [0,0,0]
+COLOR_DICT = np.array([Sky, Building, Pole, Road, Pavement,
+                          Tree, SignSymbol, Fence, Car, Pedestrian, Bicyclist, Unlabelled])
+
+def labelVisualize(num_class,color_dict,img):
+    img = img[:,:,0] if len(img.shape) == 3 else img
+    img_out = np.zeros(img.shape + (3,))
+    for i in range(num_class):
+        img_out[img == i,:] = color_dict[i]
+    return img_out / 255
+
+def saveResult(save_path,npyfile,flag_multi_class = False,num_class = 2):
+    for i,item in enumerate(npyfile):
+        img = labelVisualize(num_class,COLOR_DICT,item) if flag_multi_class else item[:,:,0]
+        io.imsave(os.path.join(save_path,"%d_predict.png"%i),img)
